@@ -9,6 +9,7 @@ from app.core.database import get_db, SessionLocal
 from app import crud
 from app.schemas.message import MessageCreate, MessageOut
 from app.agents import main_agent
+from app.agents.events import StreamEventType
 
 router = APIRouter(prefix="/conversations", tags=["chat"])
 
@@ -64,7 +65,6 @@ async def chat_stream(conv_id: str, body: ChatRequest, db: Session = Depends(get
     if not conv:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="会话不存在")
 
-    # Load history before saving user message to avoid duplication
     prior = main_agent.load_history(conv_id, db)
     content = body.content
 
@@ -72,19 +72,26 @@ async def chat_stream(conv_id: str, body: ChatRequest, db: Session = Depends(get
         gen_db = SessionLocal()
         try:
             user_msg = crud.message.create(gen_db, conv_id, MessageCreate(type="user", content=content))
-            yield _sse({"type": "user_message", "message": _msg_dict(user_msg)})
+            yield _sse({"type": StreamEventType.USER_MESSAGE, "message": _msg_dict(user_msg)})
 
-            full_content = ""
-            async for chunk in main_agent.agent_stream(conv_id, content, prior):
-                full_content += chunk
-                yield _sse({"type": "chunk", "content": chunk})
+            full_text = ""
+            async for evt in main_agent.agent_stream(conv_id, content, prior):
+                evt_type = evt.get("type")
+
+                if evt_type == StreamEventType.TEXT_CHUNK:
+                    full_text += evt["content"]
+                    yield _sse(evt)
+
+                elif evt_type == StreamEventType.AGENT_DATA:
+                    # Sub-agent structured data goes in its own SSE chunk
+                    yield _sse(evt)
 
             assistant_msg = crud.message.create(
-                gen_db, conv_id, MessageCreate(type="assistant", content=full_content)
+                gen_db, conv_id, MessageCreate(type="assistant", content=full_text)
             )
-            yield _sse({"type": "done", "message": _msg_dict(assistant_msg)})
+            yield _sse({"type": StreamEventType.DONE, "message": _msg_dict(assistant_msg)})
         except Exception as e:
-            yield _sse({"type": "error", "detail": str(e)})
+            yield _sse({"type": StreamEventType.ERROR, "detail": str(e)})
         finally:
             gen_db.close()
 

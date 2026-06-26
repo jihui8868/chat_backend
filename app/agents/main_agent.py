@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import pathlib
 from typing import AsyncGenerator, List
 
 from langchain_core.chat_history import BaseChatMessageHistory
@@ -10,9 +12,16 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app import crud
+from app.agents.subagents.database_agent import invoke_database_agent
+
+_PROMPT_PATH = pathlib.Path(__file__).parent / "prompts" / "main_agent.md"
+_MAIN_AGENT_PROMPT = _PROMPT_PATH.read_text(encoding="utf-8")
 
 _agent = None
 _checkpointer = None
+
+# Maps invoke_database_agent result data_type → stream event data_type
+_DB_TOOL_NAME = "invoke_database_agent"
 
 
 def _build_agent():
@@ -28,11 +37,9 @@ def _build_agent():
 
     agent = create_deep_agent(
         model=llm,
+        tools=[invoke_database_agent],
         checkpointer=checkpointer,
-        system_prompt=(
-            "你是一个专业的智能客服助手，能够友好、准确地回答用户问题。"
-            "请用中文回答，保持简洁清晰。"
-        ),
+        system_prompt=_MAIN_AGENT_PROMPT,
     )
     return agent, checkpointer
 
@@ -84,20 +91,55 @@ async def chat(conv_id: str, user_content: str, prior_messages: List[BaseMessage
     return result["messages"][-1].content
 
 
+def _extract_text(chunk_content) -> str:
+    if isinstance(chunk_content, str):
+        return chunk_content
+    if isinstance(chunk_content, list):
+        parts = []
+        for item in chunk_content:
+            if isinstance(item, dict) and item.get("type") == "text" and item.get("text"):
+                parts.append(item["text"])
+        return "".join(parts)
+    return ""
+
+
 async def agent_stream(
     conv_id: str, user_content: str, prior_messages: List[BaseMessage]
-) -> AsyncGenerator[str, None]:
+) -> AsyncGenerator[dict, None]:
+    """Yield stream event dicts:
+      {"type": "text_chunk", "content": "..."}
+      {"type": "agent_data", "agent": "database", "data_type": "...", "data": ...}
+    """
     agent = get_agent()
     config = {"configurable": {"thread_id": conv_id}}
     input_messages = prior_messages + [HumanMessage(content=user_content)]
 
-    async for event in agent.astream_events({"messages": input_messages}, config=config, version="v2"):
-        if event["event"] == "on_chat_model_stream":
-            chunk = event["data"]["chunk"]
-            content = chunk.content
-            if isinstance(content, str) and content:
-                yield content
-            elif isinstance(content, list):
-                for item in content:
-                    if isinstance(item, dict) and item.get("type") == "text" and item.get("text"):
-                        yield item["text"]
+    async for event in agent.astream_events(
+        {"messages": input_messages}, config=config, version="v2"
+    ):
+        kind = event["event"]
+
+        if kind == "on_chat_model_stream":
+            chunk = event["data"].get("chunk")
+            if chunk is None:
+                continue
+            text = _extract_text(chunk.content)
+            if text:
+                yield {"type": "text_chunk", "content": text}
+
+        elif kind == "on_tool_end" and event.get("name") == _DB_TOOL_NAME:
+            raw_output = event["data"].get("output", "")
+            # output may be a ToolMessage object or a plain string
+            if hasattr(raw_output, "content"):
+                raw_output = raw_output.content
+            try:
+                result = json.loads(raw_output)
+                for r in result.get("results", []):
+                    yield {
+                        "type": "agent_data",
+                        "agent": "database",
+                        "data_type": r.get("data_type", "unknown"),
+                        "data": r.get("data"),
+                    }
+            except (json.JSONDecodeError, AttributeError):
+                pass
