@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db, SessionLocal
 from app import crud
 from app.schemas.message import MessageCreate, MessageOut
-from app.agents import agent_main
+from app.agents import main_agent
 
 router = APIRouter(prefix="/conversations", tags=["chat"])
 
@@ -42,11 +42,11 @@ async def chat(conv_id: str, body: ChatRequest, db: Session = Depends(get_db)):
     if not conv:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="会话不存在")
 
-    prior = agent_main.load_history(conv_id, db)
+    prior = main_agent.load_history(conv_id, db)
     user_msg = crud.message.create(db, conv_id, MessageCreate(type="user", content=body.content))
 
     try:
-        reply_content = await agent_main.chat(conv_id, body.content, prior)
+        reply_content = await main_agent.chat(conv_id, body.content, prior)
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"AI 回复失败: {e}")
 
@@ -65,7 +65,7 @@ async def chat_stream(conv_id: str, body: ChatRequest, db: Session = Depends(get
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="会话不存在")
 
     # Load history before saving user message to avoid duplication
-    prior = agent_main.load_history(conv_id, db)
+    prior = main_agent.load_history(conv_id, db)
     content = body.content
 
     async def generate():
@@ -75,7 +75,7 @@ async def chat_stream(conv_id: str, body: ChatRequest, db: Session = Depends(get
             yield _sse({"type": "user_message", "message": _msg_dict(user_msg)})
 
             full_content = ""
-            async for chunk in agent_main.agent_stream(conv_id, content, prior):
+            async for chunk in main_agent.agent_stream(conv_id, content, prior):
                 full_content += chunk
                 yield _sse({"type": "chunk", "content": chunk})
 
