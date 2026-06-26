@@ -1,0 +1,19 @@
+[project]
+name = "chat-backend"
+version = "0.1.0"
+description = "Chat backend API service"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi>=0.138.1",
+    "uvicorn[standard]>=0.34.0",
+    "sqlalchemy>=2.0.51",
+    "pymysql>=1.2.0",
+    "pydantic-settings>=2.7.0",
+    "python-dotenv>=1.1.0",
+    "passlib[bcrypt]>=1.7.4",
+    "python-jose[cryptography]>=3.4.0",
+    "python-multipart>=0.0.20",
+    "pydantic[email]>=2.13.4",
+    "uuid6>=2025.0.1",
+]
