@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import List
+from typing import AsyncGenerator, List
 
 from langchain_core.chat_history import BaseChatMessageHistory
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
@@ -10,7 +10,6 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app import crud
-from app.schemas.message import MessageCreate
 
 _agent = None
 _checkpointer = None
@@ -70,16 +69,35 @@ class AppChatMessageHistory(BaseChatMessageHistory):
         pass
 
 
-async def chat(conv_id: str, user_content: str, db: Session) -> str:
+def load_history(conv_id: str, db: Session) -> List[BaseMessage]:
+    """Read conversation history BEFORE saving the new user message."""
+    return AppChatMessageHistory(conv_id, db).messages
+
+
+async def chat(conv_id: str, user_content: str, prior_messages: List[BaseMessage]) -> str:
     agent = get_agent()
+    config = {"configurable": {"thread_id": conv_id}}
+    result = await agent.ainvoke(
+        {"messages": prior_messages + [HumanMessage(content=user_content)]},
+        config=config,
+    )
+    return result["messages"][-1].content
 
-    history = AppChatMessageHistory(conv_id, db)
-    prior_messages = history.messages
 
+async def agent_stream(
+    conv_id: str, user_content: str, prior_messages: List[BaseMessage]
+) -> AsyncGenerator[str, None]:
+    agent = get_agent()
     config = {"configurable": {"thread_id": conv_id}}
     input_messages = prior_messages + [HumanMessage(content=user_content)]
 
-    result = await agent.ainvoke({"messages": input_messages}, config=config)
-
-    reply_message = result["messages"][-1]
-    return reply_message.content
+    async for event in agent.astream_events({"messages": input_messages}, config=config, version="v2"):
+        if event["event"] == "on_chat_model_stream":
+            chunk = event["data"]["chunk"]
+            content = chunk.content
+            if isinstance(content, str) and content:
+                yield content
+            elif isinstance(content, list):
+                for item in content:
+                    if isinstance(item, dict) and item.get("type") == "text" and item.get("text"):
+                        yield item["text"]
