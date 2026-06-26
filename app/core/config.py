@@ -34,5 +34,10 @@ class Settings(BaseSettings):
     algorithm: str = "HS256"
     access_token_expire_minutes: int = 60 * 24
 
+    # DeepSeek
+    deepseek_api_key: str = "sk-your-key-here"
+    deepseek_base_url: str = "https://api.deepseek.com/v1"
+    deepseek_model: str = "deepseek-chat"
+
 
 settings = Settings()
