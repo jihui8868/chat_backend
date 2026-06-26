@@ -4,10 +4,10 @@ from __future__ import annotations
 import json
 import pathlib
 
+from langchain.agents import create_agent
 from langchain_core.messages import HumanMessage, ToolMessage
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
-from langgraph.prebuilt import create_react_agent
 
 from app.agents.database.base import DatabaseConnector
 from app.core.config import settings
@@ -127,10 +127,10 @@ def _get_database_agent():
             base_url=settings.deepseek_base_url,
             api_key=settings.deepseek_api_key,
         )
-        _database_agent = create_react_agent(
+        _database_agent = create_agent(
             model=llm,
             tools=DATABASE_TOOLS,
-            prompt=_DATABASE_AGENT_PROMPT,
+            system_prompt=_DATABASE_AGENT_PROMPT,
         )
     return _database_agent
 
