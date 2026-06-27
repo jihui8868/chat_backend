@@ -12,16 +12,13 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app import crud
-from app.agents.subagents.database_agent import invoke_database_agent
+from app.agents.subagents.database_agent import DATABASE_SUBAGENT
 
 _PROMPT_PATH = pathlib.Path(__file__).parent / "prompts" / "main_agent.md"
 _MAIN_AGENT_PROMPT = _PROMPT_PATH.read_text(encoding="utf-8")
 
 _agent = None
 _checkpointer = None
-
-# Maps invoke_database_agent result data_type → stream event data_type
-_DB_TOOL_NAME = "invoke_database_agent"
 
 
 def _build_agent():
@@ -37,7 +34,7 @@ def _build_agent():
 
     agent = create_deep_agent(
         model=llm,
-        tools=[invoke_database_agent],
+        subagents=[DATABASE_SUBAGENT],
         checkpointer=checkpointer,
         system_prompt=_MAIN_AGENT_PROMPT,
     )
@@ -103,6 +100,26 @@ def _extract_text(chunk_content) -> str:
     return ""
 
 
+def _extract_task_output(raw_output) -> str | None:
+    """Extract the ToolMessage content from a task tool return value.
+
+    The task tool returns a Command whose update contains a ToolMessage.
+    Falls back to direct string / ToolMessage content for forward-compat.
+    """
+    if isinstance(raw_output, str):
+        return raw_output
+    if hasattr(raw_output, "content"):
+        return raw_output.content
+    # Command object: update["messages"][-1] is the ToolMessage
+    update = getattr(raw_output, "update", None)
+    if isinstance(update, dict):
+        msgs = update.get("messages", [])
+        for msg in reversed(msgs):
+            if hasattr(msg, "content") and msg.content:
+                return msg.content
+    return None
+
+
 async def agent_stream(
     conv_id: str, user_content: str, prior_messages: List[BaseMessage]
 ) -> AsyncGenerator[dict, None]:
@@ -120,6 +137,9 @@ async def agent_stream(
         kind = event["event"]
 
         if kind == "on_chat_model_stream":
+            # Skip sub-agent LLM events — only stream the main agent's output
+            if event.get("metadata", {}).get("ls_agent_type") == "subagent":
+                continue
             chunk = event["data"].get("chunk")
             if chunk is None:
                 continue
@@ -127,13 +147,17 @@ async def agent_stream(
             if text:
                 yield {"type": "text_chunk", "content": text}
 
-        elif kind == "on_tool_end" and event.get("name") == _DB_TOOL_NAME:
-            raw_output = event["data"].get("output", "")
-            # output may be a ToolMessage object or a plain string
-            if hasattr(raw_output, "content"):
-                raw_output = raw_output.content
+        elif kind == "on_tool_end" and event.get("name") == "task":
+            input_data = event["data"].get("input", {})
+            if input_data.get("subagent_type") != "database":
+                continue
+
+            content = _extract_task_output(event["data"].get("output"))
+            if not content:
+                continue
+
             try:
-                result = json.loads(raw_output)
+                result = json.loads(content)
                 for r in result.get("results", []):
                     yield {
                         "type": "agent_data",
