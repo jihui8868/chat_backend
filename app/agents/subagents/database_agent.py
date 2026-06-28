@@ -1,13 +1,13 @@
-"""Database sub-agent: tools + agent factory + main-agent dispatcher tool."""
+"""Database sub-agent: tools + SubAgent spec for use with create_deep_agent."""
 from __future__ import annotations
 
 import json
 import pathlib
+from typing import Any
 
-from langchain.agents import create_agent
-from langchain_core.messages import HumanMessage, ToolMessage
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
+from pydantic import BaseModel
 
 from app.agents.database.base import DatabaseConnector
 from app.core.config import settings
@@ -114,62 +114,39 @@ def db_get_status(
 
 DATABASE_TOOLS = [db_list_databases, db_list_tables, db_describe_table, db_get_status]
 
-# ── Database sub-agent (internal LangGraph ReAct agent) ───────────────────────
-
-_database_agent = None
+# ── Structured response schema ────────────────────────────────────────────────
 
 
-def _get_database_agent():
-    global _database_agent
-    if _database_agent is None:
-        llm = ChatOpenAI(
-            model=settings.deepseek_model,
-            base_url=settings.deepseek_base_url,
-            api_key=settings.deepseek_api_key,
-        )
-        _database_agent = create_agent(
-            model=llm,
-            tools=DATABASE_TOOLS,
-            system_prompt=_DATABASE_AGENT_PROMPT,
-        )
-    return _database_agent
+class DatabaseResult(BaseModel):
+    data_type: str
+    data: Any
 
 
-# ── Main-agent dispatcher tool ────────────────────────────────────────────────
+class DatabaseAgentResponse(BaseModel):
+    summary: str
+    results: list[DatabaseResult]
 
 
-@tool
-async def invoke_database_agent(query: str) -> str:
-    """调用数据库查询子智能体处理数据库相关问题。
+# ── Sub-agent specification ───────────────────────────────────────────────────
 
-    可以处理：列出数据库、列出表、查看表结构、诊断数据库运行状态。
-    用户提供的连接信息（host、port、user、password、db_type）会包含在 query 中。
 
-    Args:
-        query: 包含用户数据库查询需求和连接信息的完整描述
-    """
-    agent = _get_database_agent()
-    state = await agent.ainvoke({"messages": [HumanMessage(content=query)]})
-
-    tool_results: list[dict] = []
-    for msg in state["messages"]:
-        if isinstance(msg, ToolMessage):
-            try:
-                data = json.loads(msg.content)
-            except Exception:
-                data = {"raw": msg.content}
-            tool_results.append(
-                {
-                    "tool": msg.name,
-                    "data_type": _TOOL_TO_DATA_TYPE.get(msg.name, "unknown"),
-                    "data": data,
-                }
-            )
-
-    final_msg = state["messages"][-1]
-    summary = final_msg.content if hasattr(final_msg, "content") else ""
-
-    return json.dumps(
-        {"summary": summary, "results": tool_results},
-        ensure_ascii=False,
+def _make_llm() -> ChatOpenAI:
+    return ChatOpenAI(
+        model=settings.deepseek_model,
+        base_url=settings.deepseek_base_url,
+        api_key=settings.deepseek_api_key,
     )
+
+
+DATABASE_SUBAGENT: dict = {
+    "name": "database",
+    "description": (
+        "处理所有数据库相关操作：列出数据库服务器上的数据库、"
+        "列出指定数据库的表、查看表字段结构、诊断数据库运行状态。"
+        "需要用户提供连接信息（db_type、host、port、user、password）。"
+    ),
+    "system_prompt": _DATABASE_AGENT_PROMPT,
+    "tools": DATABASE_TOOLS,
+    "model": _make_llm(),
+    "response_format": DatabaseAgentResponse,
+}

@@ -14,3 +14,16 @@
 - 识别用户需要的操作并调用对应工具
 - 所有结果以 JSON 格式返回
 - 返回结果需包含完整数据，不要截断
+
+## 结构化响应
+
+完成工具调用后，按以下规则填写结构化响应：
+
+- `summary`：用中文简要说明操作结果（1-2句话）
+- `results`：每次工具调用对应一条记录：
+  - `data_type`：根据调用的工具填写，对应关系如下：
+    - `db_list_databases` → `"database_list"`
+    - `db_list_tables` → `"table_list"`
+    - `db_describe_table` → `"column_list"`
+    - `db_get_status` → `"db_status"`
+  - `data`：工具返回的完整 JSON 数据（原样填入，不要截断或修改）
